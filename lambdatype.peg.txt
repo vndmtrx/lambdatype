@@ -1,0 +1,304 @@
+// ===========================================================================
+//    LambdaType (.lt) Parsing Expression Grammar (PEG)
+//    Version: 1.1.0-Audited
+//    Status: Normative Target for Implementation
+//    Externals: CodeFenceOpenToken, CodeFenceCloseToken, RawBlockOpenToken, RawBlockCloseToken,
+//               RawBlockBranchToken, InlineRawOpenToken, InlineRawCloseToken,
+//               StyleOpenLookbehindToken
+//    Semantic Constraints: Dunder/C++ Immunities, EOF Tolerances are enforced by the parser.
+// ===========================================================================
+
+Document          <- BOM? Frontmatter? DocumentElement*
+DocumentElement   <- BlankLine / BlockElement
+
+// ---------------------------------------------------------------------------
+// EXTERNALS (implementados fora da PEG, com interface de scanner)
+// ---------------------------------------------------------------------------
+// CodeFenceOpenToken       : consome "`"+, registra N, emite token
+// CodeFenceCloseToken      : consome "`"+ exatamente N, emite token
+// RawBlockOpenToken        : consome "==="+ registra N
+// RawBlockCloseToken       : consome "==="+ exatamente N
+// RawBlockBranchToken      : consome "==="+ N seguido de [target]
+// InlineRawOpenToken       : consome "="+ "(" registra N
+// InlineRawCloseToken      : consome ")" "="+ exatamente N
+// StyleOpenLookbehindToken : verifica se o caractere anterior não é alfanumérico
+//                            (para imunidades de __init__, C++, etc.)
+//
+// O scanner mantém estado (N corrente por tipo de fence) e implementa
+// serialize/deserialize para parsing incremental.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 1. PRIMITIVES & LEXICAL RULES
+// ---------------------------------------------------------------------------
+BOM               <- "\uFEFF"
+Newline           <- "\r\n" / "\n"
+Space             <- " "
+Tab               <- "\t"
+WhitespaceChar    <- Space / Tab
+BlankLine         <- WhitespaceChar* Newline
+
+Digit             <- [0-9]
+HexDigit          <- [0-9a-fA-F]
+Alpha             <- [a-zA-Z]
+AlphaNum          <- [a-zA-Z0-9]
+UnicodeChar       <- !Newline .
+EscapeSeq         <- "\\" UnicodeChar
+
+// ---------------------------------------------------------------------------
+// 2. THE THREE BOXES (ONTOLOGY)
+// ---------------------------------------------------------------------------
+IdentityBoxOpen   <- "["
+IdentityBoxClose  <- "]"
+IdentityBoxInner  <- (EscapeSeq / (!IdentityBoxClose UnicodeChar))*
+IdentityBox       <- IdentityBoxOpen IdentityBoxInner IdentityBoxClose
+
+ResourceBoxOpen   <- "{"
+ResourceBoxClose  <- "}"
+
+OperationBoxOpen  <- "("
+OperationBoxClose <- ")"
+
+// Attributes: .([.class #id attr=val])
+AttrClass         <- "." AlphaNum [a-zA-Z0-9_-]*
+AttrId            <- "#" AlphaNum [a-zA-Z0-9_\-.]*
+AttrKey           <- AlphaNum [a-zA-Z0-9_-]*
+AttrVal           <- (AlphaNum [a-zA-Z0-9_\-/:.]*) / ('"' (!'"' UnicodeChar)* '"')
+AttrKV            <- AttrKey "=" AttrVal
+AttrItem          <- AttrClass / AttrId / AttrKV
+AttrBox           <- IdentityBoxOpen AttrItem (WhitespaceChar+ AttrItem)* IdentityBoxClose
+AttributeSpec     <- ".(" AttrBox+ ")"
+
+// ---------------------------------------------------------------------------
+// 3. FRONTMATTER
+// ---------------------------------------------------------------------------
+FrontmatterOpen   <- "---" IdentityBox? Space* Newline
+FrontmatterClose  <- "---" Space* Newline
+FrontmatterLine   <- (!FrontmatterClose .)* Newline
+Frontmatter       <- FrontmatterOpen FrontmatterLine* FrontmatterClose
+
+// ---------------------------------------------------------------------------
+// 4. BLOCK ELEMENTS (Ordered Choice prevents ambiguity)
+// ---------------------------------------------------------------------------
+BlockStart        <- &( CodeFence / RawBlock / ThematicBreak / Heading / Blockquote / Admonition / Details / ListElement / Table / FootnoteDef )
+BlockElement      <- (AttributeSpec Newline)? 
+                     ( CodeFence
+                     / RawBlock
+                     / ThematicBreak
+                     / Heading
+                     / Blockquote
+                     / Admonition
+                     / Details
+                     / ListElement
+                     / Table
+                     / FootnoteDef
+                     / Paragraph )
+
+// 4.1 Headings
+HeadingLevel      <- "######" / "#####" / "####" / "###" / "##" / "#"
+Heading           <- HeadingLevel IdentityBox? Space+ SingleLineInlineSeq Newline
+
+// 4.2 Thematic Break
+ThematicBreak     <- Space* "---" "-"* Space* Newline
+
+// 4.3 Code Fence 
+// (Requires state/match for N opening backticks. In PEG this is modeled via semantic predicates)
+CodeFenceOpen     <- CodeFenceOpenToken IdentityBox? Space* Newline
+CodeFenceClose    <- CodeFenceCloseToken Space* Newline
+CodeFenceLine     <- (!CodeFenceClose UnicodeChar* Newline)
+CodeFence         <- CodeFenceOpen CodeFenceLine* CodeFenceClose
+
+// 4.4 Raw Blocks
+RawTarget         <- IdentityBox
+RawBlockOpen      <- RawBlockOpenToken RawTarget? Space* Newline
+RawBlockClose     <- RawBlockCloseToken Space* Newline
+RawBlockLine      <- (!RawBlockClose !RawBlockBranch UnicodeChar* Newline)
+RawBlockBranch    <- RawBlockBranchToken RawTarget Space* Newline RawBlockLine*
+RawBlock          <- RawBlockOpen RawBlockLine* RawBlockBranch* RawBlockClose
+
+// 4.5 Blockquotes
+BlockPrefix       <- ">" Space?
+BlockquoteLine    <- BlockPrefix (Blockquote / BlockElement / InlineSeq)? Newline
+Blockquote        <- BlockquoteLine+
+
+// 4.6 Admonitions
+AdmonitionSigil   <- "-" / "#" / "?" / "!" / "+"
+AdmonitionHeader  <- "<[" AdmonitionSigil "]" (Space SingleLineInlineSeq)? Newline
+AdmonitionPrefix  <- "<" Space?
+AdmonitionLine    <- AdmonitionPrefix (BlockElement / InlineSeq)? Newline
+Admonition        <- AdmonitionHeader AdmonitionLine*
+
+// 4.7 Details
+DetailsState      <- "-" / "+"
+DetailsHeader     <- ":[" DetailsState "]" Space SingleLineInlineSeq Newline
+DetailsPrefix     <- ":" Space?
+DetailsLine       <- DetailsPrefix (BlockElement / InlineSeq)? Newline
+Details           <- DetailsHeader DetailsLine*
+
+// 4.8 Lists
+TaskCheckbox      <- "(_)" / "(#)"
+UnorderedMarker   <- "- " TaskCheckbox? Space?
+OrderedMarker     <- Digit+ ". "
+DefinitionMarker  <- "-[" IdentityBoxInner "] "
+ListContinuation  <- Tab+ InlineSeq Newline
+
+UnorderedItem     <- Tab* UnorderedMarker InlineSeq Newline ListContinuation*
+UnorderedList     <- UnorderedItem+
+
+OrderedItem       <- Tab* OrderedMarker InlineSeq Newline ListContinuation*
+OrderedList       <- OrderedItem+
+
+DefinitionItem    <- Tab* DefinitionMarker InlineSeq Newline ListContinuation*
+DefinitionList    <- DefinitionItem+
+
+ListElement       <- UnorderedList / OrderedList / DefinitionList
+
+// 4.9 Tables
+TableCaption      <- "|[" Space* SingleLineInlineSeq Space* "]|" Space* Newline
+TableColDef       <- (AlphaNum [a-zA-Z0-9_-]*) / "<"
+TableColGroupItem <- TableColDef (Space* "|" Space* TableColDef)*
+TableColGroup     <- "|{" Space* TableColGroupItem (Space* "||" Space* TableColGroupItem)* Space* "}|" Space* Newline
+
+CellAlignLeft     <- ":" "---" "-"*
+CellAlignCenter   <- ":" "---" "-"* ":"
+CellAlignRight    <- "---" "-"* ":"
+CellAlignDefault  <- "---" "-"*
+CellAlignDef      <- CellAlignCenter / CellAlignLeft / CellAlignRight / CellAlignDefault
+TableAlignRow     <- "|" Space* CellAlignDef (Space* "|" Space* CellAlignDef)* Space* "|" Space* Newline
+
+FootAlignLeft     <- ":" "===" "="*
+FootAlignCenter   <- ":" "===" "="* ":"
+FootAlignRight    <- "===" "="* ":"
+FootAlignDefault  <- "===" "="*
+FootAlignDef      <- FootAlignCenter / FootAlignLeft / FootAlignRight / FootAlignDefault
+TableFootRow      <- "|" Space* FootAlignDef (Space* "|" Space* FootAlignDef)* Space* "|" Space* Newline
+
+// Table cells consume inline items but MUST stop at unescaped `|` (the column separator)
+TableCellInline   <- TableCellSingleLineItem / IntraCellBreak
+TableCellData     <- ("<" / "^") &(Space* ("|" / Newline)) / TableCellInline+
+TableRow          <- "|" Space* TableCellData (Space* "|" Space* TableCellData)* Space* "|" Space* Newline
+
+HeaderTable       <- TableRow TableAlignRow TableRow* (TableFootRow TableRow*)?
+HeaderlessTable   <- TableAlignRow TableRow TableRow* (TableFootRow TableRow*)?
+MinimalTable      <- TableRow+
+
+Table             <- TableCaption? TableColGroup? (HeaderTable / HeaderlessTable / MinimalTable)
+
+// 4.10 Footnotes
+FootnoteDef       <- "([" IdentityBoxInner "]" IdentityBox (IdentityBox / IdentityBox IdentityBox / IdentityBox IdentityBox IdentityBox)? ")" Space* Newline
+
+// 4.11 Paragraph
+ParagraphLine     <- InlineSeq Newline
+Paragraph         <- ParagraphLine+
+
+// ---------------------------------------------------------------------------
+// 5. INLINE ELEMENTS
+// ---------------------------------------------------------------------------
+InlineSeq         <- InlineItem+
+SingleLineInlineSeq <- SingleLineInlineItem+
+
+SingleLineInlineItem <- StyledText
+                      / ThreeBoxStruct
+                      / FormCheckbox
+                      / TypographicEntity
+                      / BoxSigil
+                      / InlineRaw
+                      / InlineAttribute
+                      / ConcatOp
+                      / BlockComment
+                      / EscapeSeq
+                      / PlainTextChar
+
+// A special subset for Table Cells to prevent PlainTextChar from eating the pipe '|'
+TableCellSingleLineItem <- StyledText
+                         / ThreeBoxStruct
+                         / FormCheckbox
+                         / TypographicEntity
+                         / BoxSigil
+                         / InlineRaw
+                         / InlineAttribute
+                         / ConcatOp
+                         / SingleLineBlockComment
+                         / EscapeSeq
+                         / TablePlainTextChar
+
+InlineItem        <- SingleLineInlineItem / HardBreak / SoftBreak
+
+// 5.1 Styled Text
+// Requires asymmetric boundaries: no space immediately inside the delimiters,
+// and closing delimiter must be followed by space, punctuation, \n\n or EOF.
+StyledText        <- StyleBold / StyleItalic / StyleMark / StyleDel / StyleIns / StyleSup / StyleSub / StyleCode
+
+StyleCloseLookahead <- &(Space / "." / "," / ":" / ";" / "!" / "?" / Newline !BlankLine / Newline Newline / !.)
+
+StyleBold         <-  StyleOpenLookbehindToken "**" !WhitespaceChar InlineSeq "**" StyleCloseLookahead
+StyleItalic       <-  StyleOpenLookbehindToken "~~" !WhitespaceChar InlineSeq "~~" StyleCloseLookahead
+StyleMark         <-  StyleOpenLookbehindToken "==" !WhitespaceChar InlineSeq "==" StyleCloseLookahead
+StyleDel          <-  StyleOpenLookbehindToken "--" !WhitespaceChar InlineSeq "--" StyleCloseLookahead
+StyleIns          <-  StyleOpenLookbehindToken "++" !WhitespaceChar InlineSeq "++" StyleCloseLookahead
+StyleSup          <-  StyleOpenLookbehindToken "^^" !WhitespaceChar InlineSeq "^^" StyleCloseLookahead
+StyleSub          <-  StyleOpenLookbehindToken "__" !WhitespaceChar InlineSeq "__" StyleCloseLookahead
+StyleCode         <- "``" (!"``" UnicodeChar)* "``" StyleCloseLookahead
+
+// 5.2 Three Box Structures
+ThreeBoxStruct    <- LinkStruct / MediaStruct / AnchorJump / FootnoteCall
+
+LinkStruct        <- "[[" IdentityBoxInner "]]"
+                   / "[[" IdentityBoxInner "][" IdentityBoxInner "]]"
+                   / "[[" IdentityBoxInner "][" IdentityBoxInner "][" IdentityBoxInner "]]"
+
+AnchorJump        <- "[#" AlphaNum [a-zA-Z0-9_\-.]* "]"
+
+MediaStruct       <- "{[" IdentityBoxInner "]}"
+                   / "{[" IdentityBoxInner "][" IdentityBoxInner "]}"
+                   / "{[" IdentityBoxInner "][" IdentityBoxInner "][" IdentityBoxInner "]}"
+
+FootnoteCall      <- "[^" AlphaNum [a-zA-Z0-9_\-.]* "]"
+
+// 5.3 Form
+FormCheckbox      <- "(_)" / "(#)"
+
+// 5.4 Typographic
+TypographicEntity <- "---" / "--" / "..." / "<->" / "->" / "<-" / "=>"
+
+// 5.5 System Sigils
+BoxSigil          <- SigilKbd / SigilAbbr / SigilDfn / SigilMath / SigilTag / SigilMention / SigilCite / SigilQuote / SigilIdiom / SigilBold / SigilSmall / SigilTime
+
+SigilKbd          <- "!([" IdentityBoxInner "])"
+SigilAbbr         <- "?([" IdentityBoxInner "][" IdentityBoxInner "])"
+SigilDfn          <- ":([" IdentityBoxInner "])"
+SigilMath         <- "$([" IdentityBoxInner "])"
+SigilTag          <- "#([" IdentityBoxInner "])"
+SigilMention      <- "@([" IdentityBoxInner "])"
+SigilCite         <- "&([" IdentityBoxInner "])"
+SigilQuote        <- "^([" IdentityBoxInner "])"
+SigilIdiom        <- "~([" IdentityBoxInner "])"
+SigilBold         <- "*([" IdentityBoxInner "])"
+SigilSmall        <- "-([" IdentityBoxInner "])"
+SigilTime         <- "%([" IdentityBoxInner "][" IdentityBoxInner "])"
+
+// 5.6 Raw Inline
+InlineRawOpen     <- InlineRawOpenToken
+InlineRawClose    <- InlineRawCloseToken
+InlineRaw         <- InlineRawOpen (!InlineRawClose UnicodeChar)* InlineRawClose
+
+// 5.7 Attributes
+InlineAttribute   <- AttributeSpec
+
+// 5.8 Line Control
+SoftBreak         <- Newline !BlankLine !BlockStart
+HardBreak         <- "\\" Newline
+IntraCellBreak    <- Space "\\\\" Space
+ConcatOp          <- Space "." Space
+
+// 5.9 Block Comments
+BlockComment      <- "/*" (!"*/" (UnicodeChar / Newline))* "*/"
+SingleLineBlockComment <- "/*" (!"*/" UnicodeChar)* "*/"
+
+// 5.10 Plain Text (Negative Lookaheads for delimiters)
+// Default PlainTextChar allows '|' so that normal prose can use it, but TablePlainTextChar blocks it.
+PlainTextChar     <- !( "\\" / "[" / "{" / "(" / "]" / "}" / ")" / "*" / "~" / "=" / "-" / "+" / "^" / "_" / "`" / "|" / "/" / Newline ) UnicodeChar /
+                     ( "[" / "{" / "(" / "]" / "}" / ")" / "*" / "~" / "=" / "-" / "+" / "^" / "_" / "`" / "|" / "/" )
+                     
+TablePlainTextChar <- !( "\\" / "[" / "{" / "(" / "]" / "}" / ")" / "*" / "~" / "=" / "-" / "+" / "^" / "_" / "`" / "|" / "/" / Newline ) UnicodeChar /
+                     ( "[" / "{" / "(" / "]" / "}" / ")" / "*" / "~" / "=" / "-" / "+" / "^" / "_" / "`" / "/" )
