@@ -70,8 +70,11 @@ AttrBox           <- IdentityBoxOpen AttrItem (WhitespaceChar+ AttrItem)* Identi
 AttributeSpec     <- ".(" AttrBox+ ")"
 
 // ---------------------------------------------------------------------------
-// 3. FRONTMATTER
+// 3. FRONTMATTER (Extraído na fase de Pré-passe de Ingestão, fora do parsing)
 // ---------------------------------------------------------------------------
+// O Frontmatter é interceptado e extraído do fluxo de entrada no pipeline de
+// pré-processamento. A regra abaixo documenta a gramática da cerca reconhecida
+// pelo leitor de metadados antes de submeter o corpo ao analisador da linguagem.
 FrontmatterOpen   <- "---" IdentityBox? Space* Newline
 FrontmatterClose  <- "---" Space* Newline
 FrontmatterLine   <- (!FrontmatterClose .)* Newline
@@ -80,9 +83,10 @@ Frontmatter       <- FrontmatterOpen FrontmatterLine* FrontmatterClose
 // ---------------------------------------------------------------------------
 // 4. BLOCK ELEMENTS (Ordered Choice prevents ambiguity)
 // ---------------------------------------------------------------------------
-BlockStart        <- &( CodeFence / RawBlock / ThematicBreak / Heading / Blockquote / Admonition / Details / ListElement / Table / FootnoteDef )
+BlockStart        <- &( Section / CodeFence / RawBlock / ThematicBreak / Heading / Blockquote / Admonition / Details / ListElement / Table / FootnoteDef )
 BlockElement      <- (AttributeSpec Newline)? 
-                     ( CodeFence
+                     ( Section
+                     / CodeFence
                      / RawBlock
                      / ThematicBreak
                      / Heading
@@ -94,12 +98,20 @@ BlockElement      <- (AttributeSpec Newline)?
                      / FootnoteDef
                      / Paragraph )
 
+// 4.0 Section Blocks (:::[id] ... :::)
+SectionOpen       <- ":::" ":"* IdentityBox? Space* Newline
+SectionClose      <- ":::" ":"* Space* Newline
+SectionLine       <- !SectionClose BlockElement
+Section           <- SectionOpen SectionLine* SectionClose
+
 // 4.1 Headings
 HeadingLevel      <- "######" / "#####" / "####" / "###" / "##" / "#"
 Heading           <- HeadingLevel IdentityBox? Space+ SingleLineInlineSeq Newline
 
-// 4.2 Thematic Break
-ThematicBreak     <- Space* "---" "-"* Space* Newline
+// 4.2 Thematic Breaks & Dinkus
+ClassicBreak      <- Space* "---" "-"* Space* Newline
+DinkusBreak       <- Space* "***" "*"* Space* Newline
+ThematicBreak     <- ClassicBreak / DinkusBreak
 
 // 4.3 Code Fence 
 // (Requires state/match for N opening backticks. In PEG this is modeled via semantic predicates)

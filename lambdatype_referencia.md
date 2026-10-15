@@ -8,7 +8,9 @@
 | :--- | :--- |
 | `# Título` … `###### Título` | `<h1>` … `<h6>` |
 | `##[id] Título` | Título com âncora fixa |
-| `--- isolado` | `<hr>` (fora do Offset 0) |
+| `:::[id]` … `:::` | Seção semântica (`<section id="...">`) |
+| `--- isolado` | Divisor temático (`<hr>`) |
+| `*** isolado` | Dinkus tipográfico (`<hr class="dinkus">`) |
 | `|[ Legenda ]|` | Legenda de tabela |
 
 ### Texto
@@ -80,10 +82,13 @@
 
 ---
 
-## Parte 0: Metadados do Documento (Frontmatter)
+## Parte 0: Pré-processamento e Metadados do Documento (Frontmatter Extrínseco)
 
-### 0.1 Invariante do Offset Zero
-O cabeçalho de metadados do documento é delimitado por cercas de triplo hífen (`---`), com a exigência estrita de iniciar exatamente no **Byte 0 (`Offset 0`, linha 1, coluna 1)** do arquivo:
+### 0.1 Arquitetura de Ingestão: Desacoplamento Fora do Parsing (Pre-pass)
+O cabeçalho de Frontmatter **não é considerado código nem faz parte da gramática interna da linguagem LambdaType**. Ele é interceptado e extraído na **camada de Pré-processamento (Ingestion Pipeline / Pre-pass)** antes que qualquer análise léxica ou sintática do corpo do documento seja iniciada:
+
+- **Isolamento Arquitetural:** O pré-passer lê os bytes iniciais do arquivo (após o descarte transparente de UTF-8 BOM e normalização de CRLF). Ao identificar a abertura por `---`, isola todo o bloco até a cerca de fechamento `---` correspondente, aloca esses dados no objeto de metadados do documento (`AST.frontmatter` / `DocumentNode.metadata`) e retira integralmente o trecho do fluxo de caracteres submetido ao parser da linguagem.
+- **Libertação da Gramática:** Como o Frontmatter é removido antes do parsing, o analisador sintático do LambdaType não precisa de regras especiais ou verificações de "Offset Zero". Para o compilador central, o delimitador `---` no fluxo de entrada passa a ser exclusivamente o **divisor temático clássico (`<hr>`)**, operando de forma idêntica à tradição consagrada do Markdown.
 
 ```text
 ---
@@ -94,21 +99,21 @@ tags: [compiladores, tipografia, lsp]
 ---
 ```
 
-#### 0.1.1 Suporte a Formatos via Caixa de Identidade
-Por padrão, o formato assumido entre as cercas `---` é **YAML**. Para utilizar formatos alternativos, anexa-se a Caixa de Identidade com o nome do formato colado aos hífens de abertura:
+#### 0.1.1 Suporte a Formatos via Caixa de Identidade no Pré-processamento
+Por padrão, o formato assumido entre as cercas `---` é **YAML**. Para utilizar formatos alternativos, o pré-processador aceita a Caixa de Identidade com o nome do formato colado aos hífens de abertura:
 
-| Delimitador de Abertura (Offset 0) | Formato Assumido | Delimitador de Fechamento | Emissão / Destino |
+| Delimitador de Abertura (Byte 0) | Formato Assumido | Delimitador de Fechamento | Emissão / Destino |
 | :--- | :---: | :---: | :--- |
 | `---` | **YAML** (Padrão) | `---` | Objeto `AST.frontmatter` (`raw` string para plugins) |
 | `---[toml]` | **TOML** | `---` | Objeto `AST.frontmatter` (`raw` string para plugins) |
 | `---[json]` | **JSON** | `---` | Objeto `AST.frontmatter` (`raw` string para plugins) |
 | `---[custom]` | **Personalizado** | `---` | Objeto `AST.frontmatter` (`raw` string para plugins) |
 
-#### 0.1.2 Arquitetura do Compilador, Tolerância e Normalização
-- **Processamento no Núcleo ($O(n)$ sem Dependências):** O compilador central do LambdaType não embute parsers pesados de YAML ou TOML no binário principal. O lexer extrai o bloco de texto bruto (`raw`) e o associa à raiz da AST. O parsing estruturado do conteúdo é delegado a plugins downstream via gancho de emissão `on_frontmatter_emit` ou ferramentas de SSG (Static Site Generators).
-- **Tolerância a Arquivo Incompleto (Lossless EOF Fallback):** Caso o documento termine sem a cerca `---` de fechamento, o compilador não interrompe a execução: degrada graciosamente o bloco para texto comum inicial do corpo e emite um `Warning` educativo no LSP:
+#### 0.1.2 Pipeline de Ingestão, Tolerâncias e Normalização
+- **Processamento no Pré-passe ($O(n)$ sem Dependências):** O pré-passer do LambdaType não embute parsers pesados de YAML ou TOML no núcleo. Ele simplesmente extrai o bloco de texto bruto (`raw`) delimitado pelas cercas e o anexa aos metadados do documento. O parsing estruturado do conteúdo é delegado a plugins downstream via gancho de emissão `on_frontmatter_emit` ou ferramentas de SSG (Static Site Generators).
+- **Tolerância a Arquivo Incompleto (Lossless EOF Fallback):** Caso o documento termine sem a cerca `---` de fechamento, o pré-passer não aborta a execução: descarta a interpretação de metadados, devolve todo o bloco ao fluxo de texto comum inicial e emite um `Warning` educativo no LSP:
   > `[Warning L1:C1] Bloco de Frontmatter não finalizado. Esperado delimitador '---' de fechamento.`
-- **Tolerância a UTF-8 BOM:** Arquivos codificados com a marca de ordem de byte UTF-8 (BOM: `0xEF, 0xBB, 0xBF` / `U+FEFF`), comuns no Windows, têm o BOM automaticamente descartado pelo pré-processador antes de validar o Byte 0, preservando a detecção do Frontmatter.
+- **Tolerância a UTF-8 BOM:** Arquivos codificados com a marca de ordem de byte UTF-8 (BOM: `0xEF, 0xBB, 0xBF` / `U+FEFF`), comuns no Windows, têm o BOM automaticamente descartado pelo pré-processador antes de inspecionar a primeira linha, preservando a detecção do Frontmatter.
 - **Normalização Canônica de Quebras de Linha:** Todas as sequências de quebra de linha física (`\r\n` CRLF ou `\r` legado) são normalizadas para o byte único `\n` (`0x0A`) na fase inicial de bufferização de entrada.
 
 ---
@@ -134,6 +139,88 @@ Por padrão, o formato assumido entre as cercas `---` é **YAML**. Para utilizar
 >   2. **Zonas contíguas de substituição:** Espaços (`0x20`) e/ou letras acentuadas/não-ASCII colapsam para **no máximo duplo hífen (`--`)** (ou hífen simples `-` se for apenas um espaço entre palavras).
 >   3. **Desambiguação automática:** Em caso de IDs duplicados no mesmo documento, anexa-se um sufixo numérico sequencial (`-1`, `-2`).
 > - **Degradação de Hashes Excedentes:** Linhas que iniciem com 7 ou mais hashes (`#######`) não constituem títulos válidos e degradam diretamente para texto de parágrafo comum em $O(1)$.
+
+### 1.2 Blocos de Seção Semântica (Sections — `:::[id]`)
+
+Para estruturar ensaios longos, documentações modulares e posts em regiões semânticas bem definidas do DOM, o LambdaType oferece cercas estruturais de seção delimitadas pelo sigilo de triplo dois-pontos (`:::`), emitindo tags HTML5 `<section>` com suporte direto à Caixa de Identidade (`[id]`).
+
+#### 1.2.1 Sintaxe Canônica e Emissão
+
+A abertura da seção exige 3 ou mais dois-pontos consecutivos (`:::`, `::::`, etc.) colados opcionalmente à Caixa de Identidade `[id]`. O fechamento é demarcado por uma linha isolada contendo exatamente a mesma quantidade de dois-pontos:
+
+```text
+:::[arquitetura-do-compilador]
+## Arquitetura do Compilador
+
+O compilador opera em pipeline de múltiplos estágios desacoplados.
+:::
+```
+
+*HTML Resultante:*
+```html
+<section id="arquitetura-do-compilador">
+  <h2>Arquitetura do Compilador</h2>
+  <p>O compilador opera em pipeline de múltiplos estágios desacoplados.</p>
+</section>
+```
+
+#### 1.2.2 Seções sem Identificador (Container Anônimo)
+Se a Caixa de Identidade for omitida (`:::` isolado na abertura), o bloco compila como uma `<section>` genérica:
+
+```text
+:::
+Parágrafo contido em uma seção anônima.
+:::
+```
+
+*HTML Resultante:*
+```html
+<section>
+  <p>Parágrafo contido em uma seção anônima.</p>
+</section>
+```
+
+#### 1.2.3 Injeção de Classes e Atributos via `.([ ... ])`
+Assim como em outros blocos estruturais, a cerca de seção aceita a Caixa de Atributos de Bloco `.([...])` na linha imediatamente anterior:
+
+```text
+.([.editorial-highlight .theme-dark])
+:::[capitulo-destaque]
+## Capítulo em Destaque
+
+Conteúdo com estilização temática e identificador semântico.
+:::
+```
+
+*HTML Resultante:*
+```html
+<section class="editorial-highlight theme-dark" id="capitulo-destaque">
+  <h2>Capítulo em Destaque</h2>
+  <p>Conteúdo com estilização temática e identificador semântico.</p>
+</section>
+```
+
+#### 1.2.4 Desambiguação em $O(1)$ e Aninhamento Simétrico
+- **Desambiguação Léxica com Blocos Expansíveis (Details):** O caractere `:` no início de linha nunca gera ambiguidade no scanner:
+  - `:::` (3 ou mais dois-pontos) $\rightarrow$ Cerca de Seção (`<section>`).
+  - `:[-]` ou `:[+]` (dois-pontos colado a `[-]` ou `[+]`) $\rightarrow$ Cabeçalho de Details expansível (`3.6`).
+  - `: ` (dois-pontos seguido de espaço) $\rightarrow$ Continuação de corpo de Details.
+- **Aninhamento Simétrico ($N \ge 3$):** Para aninhar seções dentro de outras seções, o container externo pode expandir a cerca para $N=4$ (`::::[pai]`), mantendo parsing determinístico sem backtracking:
+  ```text
+  ::::[modulo-principal]
+  # Módulo Principal
+
+  :::[subsecao-a]
+  ### Subseção A
+  Texto da subseção A.
+  :::
+
+  :::[subsecao-b]
+  ### Subseção B
+  Texto da subseção B.
+  :::
+  ::::
+  ```
 
 ---
 
@@ -1116,31 +1203,56 @@ A abertura exige o caractere `:` colado à Caixa de Identidade contendo compulso
 
 ---
 
-### 3.7 Divisor Temático (Thematic Break — `<hr>`)
+### 3.7 Divisores Temáticos e Quebras Literárias (Thematic Breaks)
 
-Utilizado para representar uma separação temática ou mudança de cena em nível de parágrafo:
+O LambdaType distingue formalmente duas modalidades de quebras temáticas no fluxo de parágrafos: a régua divisória neutra e linear (`---`) e o ornamento tipográfico de cena (**Dinkus** — `***`).
 
-#### 3.7.1 Regra de Reconhecimento
-- **Sintaxe Canônica:** Uma sequência de **3 ou mais hífens consecutivos** (`---`, `----`, etc.) isolada em sua respectiva linha (fora do Offset 0 do documento):
+#### 3.7.1 Divisor Temático Clássico (`---` — `<hr>`)
+Utilizado para representar uma separação temática ou mudança de tópico com uma régua horizontal neutra:
+
+- **Sintaxe Canônica:** Uma sequência de **3 ou mais hífens consecutivos** (`---`, `----`, etc.) isolada em sua respectiva linha:
   ```text
   Primeiro parágrafo do capítulo.
 
   ---
 
-  Novo parágrafo após a quebra temática.
+  Novo parágrafo após a divisão temática.
   ```
 
 *HTML Resultante:*
 ```html
 <p>Primeiro parágrafo do capítulo.</p>
 <hr>
-<p>Novo parágrafo após a quebra temática.</p>
+<p>Novo parágrafo após a divisão temática.</p>
 ```
 
-#### 3.7.2 Regras de Borda e Degradação
-- **Isolamento Estrito:** A linha do divisor aceita apenas espaços opcionais em branco antes ou depois dos hífens (`[ ]*---[ ]*\n`).
-- **Degradação:** Se houver qualquer outro caractere na linha (como letras, pontuações ou tabulações `\t`), a linha perde a condição de divisor e é avaliada conforme a regra de travessão tipográfico `---` (`&mdash;`) ou hífen literal contíguo (`5.5`).
-- **Offset Zero:** Se ocorrer exatamente no Byte 0 do arquivo, ativa o cabeçalho de Frontmatter (`0.1`), nunca `<hr>`.
+- **Sem Ambiguidade com Frontmatter:** Como o Frontmatter é desacoplado e extraído na fase de Pré-passe antes do parsing (`0.1`), qualquer `---` isolado no corpo do documento é incondicionalmente um `<hr>`.
+
+#### 3.7.2 Dinkus Tipográfico (`***` — `<hr class="dinkus">`)
+Na tipografia editorial clássica e literária, o *dinkus* (frequentemente composto por três asteriscos ou asterismo `⁂`) é o separador canônico para quebras de cena, elipses temporais e transições sutis entre seções narrativas, sem introduzir uma régua linear fria na página.
+
+- **Sintaxe Canônica:** Uma sequência de **3 ou mais asteriscos consecutivos** (`***`, `****`, etc.) isolada em sua respectiva linha:
+  ```text
+  O sol já havia se posto sobre o horizonte de colinas.
+
+  ***
+
+  Na manhã seguinte, a comitiva reiniciou a marcha.
+  ```
+
+*HTML Resultante:*
+```html
+<p>O sol já havia se posto sobre o horizonte de colinas.</p>
+<hr class="dinkus">
+<p>Na manhã seguinte, a comitiva reiniciou a marcha.</p>
+```
+
+- **Estilização e Semântica:** A emissão como `<hr class="dinkus">` preserva a semântica de divisão temática do HTML5 e permite que temas CSS estilizem facilmente o ornamento (ex.: removendo a borda e renderizando `***` ou `⁂` centralizado com espaçamento de tipos).
+
+#### 3.7.3 Regras de Borda e Degradação
+- **Isolamento Estrito:** A linha dos divisores (`---` ou `***`) aceita apenas espaços opcionais em branco antes ou depois dos caracteres marcadores (`[ ]*---[ ]*\n` ou `[ ]*\*\*\*[ ]*\n`).
+- **Degradação de `---`:** Se houver qualquer outro caractere na linha (como letras, pontuações ou tabulações `\t`), a linha perde a condição de divisor e é avaliada conforme a regra de travessão tipográfico `---` (`&mdash;`) ou hífen literal contíguo (`5.5`).
+- **Degradação de `***`:** Se houver texto ou outros caracteres na linha, os asteriscos são avaliados pelas regras de estilo casado (`**` para negrito + `*` literal ou sigilos inline), nunca quebra temática de bloco.
 
 ---
 
